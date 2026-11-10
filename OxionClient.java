@@ -11,12 +11,14 @@ import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
+import net.minecraft.client.gui.screen.ingame.GenericContainerScreen;
 import net.minecraft.client.option.KeyBinding;
 import net.minecraft.client.render.RenderLayer;
 import net.minecraft.client.render.VertexConsumer;
 import net.minecraft.client.render.VertexRendering;
 import net.minecraft.client.util.math.MatrixStack;
 import net.minecraft.client.util.InputUtil;
+import net.minecraft.component.DataComponentTypes;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.EquipmentSlot;
 import net.minecraft.entity.ItemEntity;
@@ -29,6 +31,7 @@ import net.minecraft.item.BlockItem;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.network.packet.c2s.play.PlayerMoveC2SPacket;
+import net.minecraft.registry.tag.ItemTags;
 import net.minecraft.screen.slot.SlotActionType;
 import net.minecraft.text.Text;
 import net.minecraft.util.Hand;
@@ -57,7 +60,7 @@ public class OxionClient implements ClientModInitializer {
     static int ACCENT = 0xFF9B5CFF;
     static double prevX, prevZ, bps;
 
-    public enum Category { COMBAT, MOVEMENT, RENDER, PLAYER }
+    public enum Category { COMBAT, MOVEMENT, RENDER, PLAYER, MISC }
 
     // ---------------- Settings ----------------
     public static class Setting {
@@ -105,6 +108,42 @@ public class OxionClient implements ClientModInitializer {
         MODULES.add(new AntiAFK());
         MODULES.add(new AutoRespawn());
         MODULES.add(new AutoWalk());
+        MODULES.add(new AutoGapple());
+        MODULES.add(new AutoBlock());
+        MODULES.add(new BowAimbot());
+        MODULES.add(new AutoWeapon());
+        MODULES.add(new FastBow());
+        MODULES.add(new LongJump());
+        MODULES.add(new HighJump());
+        MODULES.add(new Strafe());
+        MODULES.add(new Jetpack());
+        MODULES.add(new AutoJump());
+        MODULES.add(new SafeWalk());
+        MODULES.add(new Parkour());
+        MODULES.add(new AntiVoid());
+        MODULES.add(new ElytraFly());
+        MODULES.add(new FastClimb());
+        MODULES.add(new Dolphin());
+        MODULES.add(new Hover());
+        MODULES.add(new ReverseStep());
+        MODULES.add(new Zoom());
+        MODULES.add(new FOVChanger());
+        MODULES.add(new Crosshair());
+        MODULES.add(new Radar());
+        MODULES.add(new Keystrokes());
+        MODULES.add(new Compass());
+        MODULES.add(new Speedometer());
+        MODULES.add(new AutoEat());
+        MODULES.add(new AutoArmor());
+        MODULES.add(new Derp());
+        MODULES.add(new Spin());
+        MODULES.add(new Freeze());
+        MODULES.add(new ChestStealer());
+        MODULES.add(new AutoFish());
+        MODULES.add(new RightClicker());
+        MODULES.add(new AutoMine());
+        MODULES.add(new AutoLog());
+        MODULES.add(new Panic());
 
         menuKey = KeyBindingHelper.registerKeyBinding(new KeyBinding(
                 "Oxion DLC Menu", InputUtil.Type.KEYSYM, GLFW.GLFW_KEY_RIGHT_SHIFT, "Oxion DLC"));
@@ -139,6 +178,8 @@ public class OxionClient implements ClientModInitializer {
         HudRenderCallback.EVENT.register((ctx, tick) -> {
             if (mc.player == null || mc.options.hudHidden || mc.options.debugEnabled) return;
             if (find("HUD") instanceof HUD h && h.enabled) renderHud(ctx, h);
+            int sw = ctx.getScaledWindowWidth(), sh = ctx.getScaledWindowHeight();
+            for (Module m : MODULES) if (m.enabled) m.onHud(ctx, sw, sh);
         });
     }
 
@@ -191,6 +232,7 @@ public class OxionClient implements ClientModInitializer {
         Module(String name, Category c) { this.name = name; this.category = c; }
         <T extends Setting> T add(T s) { settings.add(s); return s; }
         void onTick() {}
+        void onHud(DrawContext ctx, int sw, int sh) {}
         void onEnable() {}
         void onDisable() {}
         void toggle() {
@@ -532,6 +574,444 @@ public class OxionClient implements ClientModInitializer {
         @Override void onDisable() { mc.options.forwardKey.setPressed(false); }
     }
 
+
+
+    // ================= EXTRA MODULES =================
+    static void selectSlot(int i) { mc.player.getInventory().selectedSlot = i; }
+
+    static int findHotbar(java.util.function.Predicate<ItemStack> pr) {
+        for (int i = 0; i < 9; i++) if (pr.test(mc.player.getInventory().getStack(i))) return i;
+        return -1;
+    }
+
+    static Vec3d moveDir() {
+        double yaw = Math.toRadians(mc.player.getYaw());
+        double f = (mc.options.forwardKey.isPressed() ? 1 : 0) - (mc.options.backKey.isPressed() ? 1 : 0);
+        double s = (mc.options.leftKey.isPressed() ? 1 : 0) - (mc.options.rightKey.isPressed() ? 1 : 0);
+        double x = -Math.sin(yaw) * f + Math.cos(yaw) * s, z = Math.cos(yaw) * f + Math.sin(yaw) * s;
+        double len = Math.hypot(x, z);
+        return len < 1e-4 ? Vec3d.ZERO : new Vec3d(x / len, 0, z / len);
+    }
+
+    // ---- Combat ----
+    static class AutoGapple extends Module {
+        Setting hp = add(new Setting("HP", 10, 1, 20));
+        boolean eating;
+        AutoGapple() { super("AutoGapple", Category.COMBAT); }
+        @Override void onTick() {
+            if (mc.player.getHealth() <= hp.f()) {
+                int slot = findHotbar(st -> st.isOf(Items.GOLDEN_APPLE) || st.isOf(Items.ENCHANTED_GOLDEN_APPLE));
+                if (slot >= 0) { selectSlot(slot); mc.options.useKey.setPressed(true); eating = true; return; }
+            }
+            if (eating) { mc.options.useKey.setPressed(false); eating = false; }
+        }
+        @Override void onDisable() { if (eating) mc.options.useKey.setPressed(false); eating = false; }
+    }
+
+    static class AutoBlock extends Module {
+        Setting range = add(new Setting("Range", 4.5, 2, 6));
+        boolean on;
+        AutoBlock() { super("AutoBlock", Category.COMBAT); }
+        @Override void onTick() {
+            boolean shield = mc.player.getOffHandStack().isOf(Items.SHIELD) || mc.player.getMainHandStack().isOf(Items.SHIELD);
+            if (shield && nearest(range.d(), 360f, true, true) != null) { mc.options.useKey.setPressed(true); on = true; }
+            else if (on) { mc.options.useKey.setPressed(false); on = false; }
+        }
+        @Override void onDisable() { if (on) mc.options.useKey.setPressed(false); on = false; }
+    }
+
+    static class BowAimbot extends Module {
+        Setting range = add(new Setting("Range", 40, 10, 80));
+        Setting lead = add(new Setting("Drop", 0.08, 0, 0.3));
+        BowAimbot() { super("BowAimbot", Category.COMBAT); }
+        @Override void onTick() {
+            if (!mc.player.isUsingItem() || !mc.player.getActiveItem().isOf(Items.BOW)) return;
+            LivingEntity t = nearest(range.d(), 360f, true, true);
+            if (t == null) return;
+            float[] r = rotsTo(t);
+            mc.player.setYaw(r[0]);
+            mc.player.setPitch(MathHelper.clamp(r[1] - (float) (mc.player.distanceTo(t) * lead.d()), -90f, 90f));
+        }
+    }
+
+    static class AutoWeapon extends Module {
+        AutoWeapon() { super("AutoWeapon", Category.COMBAT); }
+        @Override void onTick() {
+            if (mc.currentScreen != null || !mc.options.attackKey.isPressed() || !(mc.crosshairTarget instanceof EntityHitResult)) return;
+            int slot = findHotbar(st -> st.isIn(ItemTags.SWORDS));
+            if (slot >= 0) selectSlot(slot);
+        }
+    }
+
+    static class FastBow extends Module {
+        Setting ticks = add(new Setting("Ticks", 3, 1, 20));
+        FastBow() { super("FastBow", Category.COMBAT); }
+        @Override void onTick() {
+            if (mc.player.isUsingItem() && mc.player.getActiveItem().isOf(Items.BOW) && mc.player.getItemUseTime() >= ticks.f())
+                mc.interactionManager.stopUsingItem(mc.player);
+        }
+    }
+
+    // ---- Movement ----
+    static class LongJump extends Module {
+        Setting boost = add(new Setting("Boost", 1.6, 1.0, 3.0));
+        LongJump() { super("LongJump", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.options.jumpKey.isPressed() && mc.player.isOnGround() && moving()) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x * boost.d(), v.y, v.z * boost.d());
+            }
+        }
+    }
+
+    static class HighJump extends Module {
+        Setting power = add(new Setting("Power", 0.8, 0.45, 2.0));
+        HighJump() { super("HighJump", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.options.jumpKey.isPressed() && mc.player.isOnGround()) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x, power.d(), v.z);
+            }
+        }
+    }
+
+    static class Strafe extends Module {
+        Strafe() { super("Strafe", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (!moving() || mc.player.isOnGround()) return;
+            Vec3d v = mc.player.getVelocity(), d = moveDir();
+            double sp = Math.max(Math.hypot(v.x, v.z), 0.2);
+            mc.player.setVelocity(d.x * sp, v.y, d.z * sp);
+        }
+    }
+
+    static class Jetpack extends Module {
+        Setting power = add(new Setting("Power", 0.35, 0.1, 1.0));
+        Jetpack() { super("Jetpack", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.options.jumpKey.isPressed()) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x, power.d(), v.z);
+                mc.player.fallDistance = 0;
+            }
+        }
+    }
+
+    static class AutoJump extends Module {
+        AutoJump() { super("AutoJump", Category.MOVEMENT); }
+        @Override void onTick() { if (mc.player.horizontalCollision && mc.player.isOnGround() && moving()) mc.player.jump(); }
+    }
+
+    static class SafeWalk extends Module {
+        boolean active;
+        SafeWalk() { super("SafeWalk", Category.MOVEMENT); }
+        @Override void onTick() {
+            Vec3d v = mc.player.getVelocity();
+            BlockPos ahead = BlockPos.ofFloored(mc.player.getX() + v.x * 4, mc.player.getY() - 1, mc.player.getZ() + v.z * 4);
+            boolean edge = mc.player.isOnGround() && moving() && mc.world.getBlockState(ahead).isAir();
+            if (edge) { mc.options.sneakKey.setPressed(true); active = true; }
+            else if (active) { mc.options.sneakKey.setPressed(false); active = false; }
+        }
+        @Override void onDisable() { if (active) mc.options.sneakKey.setPressed(false); active = false; }
+    }
+
+    static class Parkour extends Module {
+        Parkour() { super("Parkour", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (!mc.player.isOnGround() || mc.player.isSneaking() || !moving()) return;
+            Vec3d v = mc.player.getVelocity();
+            if (Math.hypot(v.x, v.z) < 0.05) return;
+            BlockPos ahead = BlockPos.ofFloored(mc.player.getX() + v.x * 4, mc.player.getY() - 1, mc.player.getZ() + v.z * 4);
+            if (mc.world.getBlockState(ahead).isAir()) mc.player.jump();
+        }
+    }
+
+    static class AntiVoid extends Module {
+        AntiVoid() { super("AntiVoid", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.player.getY() < mc.world.getBottomY() + 2) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x, 0.8, v.z);
+            }
+        }
+    }
+
+    static class ElytraFly extends Module {
+        Setting speed = add(new Setting("Speed", 1.2, 0.5, 3.0));
+        ElytraFly() { super("ElytraFly", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (!mc.player.isFallFlying()) return;
+            if (mc.options.forwardKey.isPressed()) mc.player.setVelocity(mc.player.getRotationVector().multiply(speed.d()));
+            else if (mc.options.sneakKey.isPressed()) mc.player.setVelocity(Vec3d.ZERO);
+        }
+    }
+
+    static class FastClimb extends Module {
+        FastClimb() { super("FastClimb", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.player.isClimbing() && (mc.options.jumpKey.isPressed() || mc.player.horizontalCollision)) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x, 0.3, v.z);
+            }
+        }
+    }
+
+    static class Dolphin extends Module {
+        Dolphin() { super("Dolphin", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (mc.player.isTouchingWater() && moving()) {
+                Vec3d v = mc.player.getVelocity();
+                if (Math.hypot(v.x, v.z) < 0.5) mc.player.setVelocity(v.x * 1.12, v.y, v.z * 1.12);
+            }
+        }
+    }
+
+    static class Hover extends Module {
+        Hover() { super("Hover", Category.MOVEMENT); }
+        @Override void onTick() {
+            if (!mc.player.isOnGround() && !mc.options.jumpKey.isPressed() && !mc.options.sneakKey.isPressed()) {
+                Vec3d v = mc.player.getVelocity();
+                mc.player.setVelocity(v.x, 0, v.z);
+                mc.player.fallDistance = 0;
+            }
+        }
+    }
+
+    static class ReverseStep extends Module {
+        ReverseStep() { super("ReverseStep", Category.MOVEMENT); }
+        @Override void onTick() {
+            Vec3d v = mc.player.getVelocity();
+            if (!mc.player.isOnGround() && v.y < 0 && v.y > -0.6
+                    && !mc.world.getBlockState(BlockPos.ofFloored(mc.player.getX(), mc.player.getY() - 1.2, mc.player.getZ())).isAir())
+                mc.player.setVelocity(v.x, -1.0, v.z);
+        }
+    }
+
+    // ---- Render ----
+    static int origFov = -1;
+
+    static void setFov(int f) {
+        if (origFov < 0) origFov = mc.options.getFov().getValue();
+        mc.options.getFov().setValue(f);
+    }
+
+    static void restoreFov() {
+        if (origFov >= 0) { mc.options.getFov().setValue(origFov); origFov = -1; }
+    }
+
+    static class Zoom extends Module {
+        Setting fov = add(new Setting("FOV", 30, 30, 60));
+        Zoom() { super("Zoom", Category.RENDER); }
+        @Override void onTick() { setFov((int) fov.d()); }
+        @Override void onDisable() { restoreFov(); }
+    }
+
+    static class FOVChanger extends Module {
+        Setting fov = add(new Setting("FOV", 100, 30, 110));
+        FOVChanger() { super("FOVChanger", Category.RENDER); }
+        @Override void onTick() { setFov((int) fov.d()); }
+        @Override void onDisable() { restoreFov(); }
+    }
+
+    static class Crosshair extends Module {
+        Setting size = add(new Setting("Size", 6, 2, 16)), gap = add(new Setting("Gap", 3, 0, 10)),
+                thick = add(new Setting("Thickness", 1, 1, 3)), rainbow = add(new Setting("Rainbow", false));
+        Crosshair() { super("Crosshair", Category.RENDER); }
+        @Override void onHud(DrawContext ctx, int sw, int sh) {
+            int cx = sw / 2, cy = sh / 2, g = (int) gap.d(), l = (int) size.d(), t = (int) thick.d(), h1 = t / 2;
+            int c = rainbow.on() ? 0xFF000000 | MathHelper.hsvToRgb((System.currentTimeMillis() % 3000) / 3000f, 0.7f, 1f) : ACCENT;
+            ctx.fill(cx - g - l, cy - h1, cx - g, cy - h1 + t, c);
+            ctx.fill(cx + g, cy - h1, cx + g + l, cy - h1 + t, c);
+            ctx.fill(cx - h1, cy - g - l, cx - h1 + t, cy - g, c);
+            ctx.fill(cx - h1, cy + g, cx - h1 + t, cy + g + l, c);
+        }
+    }
+
+    static class Radar extends Module {
+        Setting size = add(new Setting("Size", 90, 60, 150)), range = add(new Setting("Range", 40, 10, 100));
+        Setting pl = add(new Setting("Players", true)), mb = add(new Setting("Mobs", true));
+        Radar() { super("Radar", Category.RENDER); }
+        @Override void onHud(DrawContext ctx, int sw, int sh) {
+            int sz = (int) size.d(), x = 8, y = sh / 2 - sz / 2, c = sz / 2;
+            ctx.fill(x, y, x + sz, y + sz, 0xAA0E0E14);
+            ctx.fill(x, y + c, x + sz, y + c + 1, 0x33FFFFFF);
+            ctx.fill(x + c, y, x + c + 1, y + sz, 0x33FFFFFF);
+            ctx.fill(x + c - 1, y + c - 1, x + c + 2, y + c + 2, ACCENT);
+            double yaw = Math.toRadians(mc.player.getYaw()), scale = (c - 2) / range.d();
+            double fx = -Math.sin(yaw), fz = Math.cos(yaw), rx = -Math.cos(yaw), rz = -Math.sin(yaw);
+            for (Entity e : mc.world.getEntities()) {
+                if (!validTarget(e, pl.on(), mb.on())) continue;
+                double dx = e.getX() - mc.player.getX(), dz = e.getZ() - mc.player.getZ();
+                double px = (dx * rx + dz * rz) * scale, py = -(dx * fx + dz * fz) * scale;
+                if (Math.abs(px) > c - 2 || Math.abs(py) > c - 2) continue;
+                int col = e instanceof PlayerEntity ? 0xFFFF5C7A : 0xFFFFB347;
+                ctx.fill(x + c + (int) px - 1, y + c + (int) py - 1, x + c + (int) px + 2, y + c + (int) py + 2, col);
+            }
+        }
+    }
+
+    static class Keystrokes extends Module {
+        Keystrokes() { super("Keystrokes", Category.RENDER); }
+        void key(DrawContext ctx, int x, int y, int w, int h, String t, boolean down) {
+            ctx.fill(x, y, x + w, y + h, down ? (ACCENT & 0xFFFFFF) | 0xCC000000 : 0xAA0E0E14);
+            ctx.drawCenteredTextWithShadow(mc.textRenderer, t, x + w / 2, y + h / 2 - 4, 0xFFFFFFFF);
+        }
+        @Override void onHud(DrawContext ctx, int sw, int sh) {
+            int x = sw - 84, y = sh - 84;
+            key(ctx, x + 27, y, 24, 24, "W", mc.options.forwardKey.isPressed());
+            key(ctx, x, y + 26, 24, 24, "A", mc.options.leftKey.isPressed());
+            key(ctx, x + 27, y + 26, 24, 24, "S", mc.options.backKey.isPressed());
+            key(ctx, x + 54, y + 26, 24, 24, "D", mc.options.rightKey.isPressed());
+            key(ctx, x, y + 52, 78, 16, "SPACE", mc.options.jumpKey.isPressed());
+        }
+    }
+
+    static class Compass extends Module {
+        Compass() { super("Compass", Category.RENDER); }
+        @Override void onHud(DrawContext ctx, int sw, int sh) {
+            String t = mc.player.getHorizontalFacing().asString().toUpperCase() + "  " + (int) MathHelper.wrapDegrees(mc.player.getYaw());
+            ctx.drawCenteredTextWithShadow(mc.textRenderer, t, sw / 2, 26, ACCENT);
+        }
+    }
+
+    static class Speedometer extends Module {
+        Speedometer() { super("Speedometer", Category.RENDER); }
+        @Override void onHud(DrawContext ctx, int sw, int sh) {
+            ctx.drawCenteredTextWithShadow(mc.textRenderer, String.format("%.1f b/s", bps), sw / 2, sh - 62, 0xFFFFFFFF);
+        }
+    }
+
+    // ---- Player ----
+    static class AutoEat extends Module {
+        Setting hunger = add(new Setting("Hunger", 14, 1, 19));
+        boolean eating;
+        AutoEat() { super("AutoEat", Category.PLAYER); }
+        @Override void onTick() {
+            if (mc.player.getHungerManager().getFoodLevel() <= hunger.f()) {
+                int slot = findHotbar(st -> st.contains(DataComponentTypes.FOOD));
+                if (slot >= 0) { selectSlot(slot); mc.options.useKey.setPressed(true); eating = true; return; }
+            }
+            if (eating) { mc.options.useKey.setPressed(false); eating = false; }
+        }
+        @Override void onDisable() { if (eating) mc.options.useKey.setPressed(false); eating = false; }
+    }
+
+    static class AutoArmor extends Module {
+        int cd;
+        AutoArmor() { super("AutoArmor", Category.PLAYER); }
+        @Override void onTick() {
+            if (cd > 0) { cd--; return; }
+            var inv = mc.player.getInventory();
+            for (int i = 0; i < 36; i++) {
+                ItemStack st = inv.getStack(i);
+                var eq = st.get(DataComponentTypes.EQUIPPABLE);
+                if (eq == null) continue;
+                EquipmentSlot es = eq.slot();
+                if (es != EquipmentSlot.HEAD && es != EquipmentSlot.CHEST && es != EquipmentSlot.LEGS && es != EquipmentSlot.FEET) continue;
+                if (mc.player.getEquippedStack(es).isEmpty()) {
+                    int slotId = i < 9 ? 36 + i : i;
+                    mc.interactionManager.clickSlot(mc.player.playerScreenHandler.syncId, slotId, 0, SlotActionType.QUICK_MOVE, mc.player);
+                    cd = 6;
+                    return;
+                }
+            }
+        }
+    }
+
+    static class Derp extends Module {
+        Derp() { super("Derp", Category.PLAYER); }
+        @Override void onTick() {
+            mc.player.setYaw((float) (Math.random() * 360 - 180));
+            mc.player.setPitch((float) (Math.random() * 180 - 90));
+        }
+    }
+
+    static class Spin extends Module {
+        Setting speed = add(new Setting("Speed", 30, 5, 90));
+        Spin() { super("Spin", Category.PLAYER); }
+        @Override void onTick() { mc.player.setYaw(mc.player.getYaw() + speed.f()); }
+    }
+
+    static class Freeze extends Module {
+        Freeze() { super("Freeze", Category.PLAYER); }
+        @Override void onTick() { mc.player.setVelocity(Vec3d.ZERO); }
+    }
+
+    // ---- Misc ----
+    static class ChestStealer extends Module {
+        Setting delay = add(new Setting("Delay", 2, 0, 10));
+        int cd;
+        ChestStealer() { super("ChestStealer", Category.MISC); }
+        @Override void onTick() {
+            if (!(mc.currentScreen instanceof GenericContainerScreen gs)) return;
+            if (cd-- > 0) return;
+            var h = gs.getScreenHandler();
+            int n = h.getRows() * 9;
+            for (int i = 0; i < n; i++) {
+                if (!h.getSlot(i).getStack().isEmpty()) {
+                    mc.interactionManager.clickSlot(h.syncId, i, 0, SlotActionType.QUICK_MOVE, mc.player);
+                    cd = (int) delay.d();
+                    return;
+                }
+            }
+        }
+    }
+
+    static class AutoFish extends Module {
+        int cd;
+        AutoFish() { super("AutoFish", Category.MISC); }
+        @Override void onTick() {
+            if (!mc.player.getMainHandStack().isOf(Items.FISHING_ROD)) return;
+            if (cd > 0) { cd--; return; }
+            var hook = mc.player.fishHook;
+            if (hook == null) {
+                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                cd = 30;
+            } else if (hook.getVelocity().y < -0.08) {
+                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+                cd = 25;
+            }
+        }
+    }
+
+    static class RightClicker extends Module {
+        Setting cps = add(new Setting("CPS", 8, 1, 20));
+        int t;
+        RightClicker() { super("RightClicker", Category.MISC); }
+        @Override void onTick() {
+            if (mc.currentScreen != null || !mc.options.useKey.isPressed()) return;
+            if (++t >= Math.max(1, Math.round(20 / cps.f()))) {
+                t = 0;
+                mc.interactionManager.interactItem(mc.player, Hand.MAIN_HAND);
+            }
+        }
+    }
+
+    static class AutoMine extends Module {
+        AutoMine() { super("AutoMine", Category.MISC); }
+        @Override void onTick() { mc.options.attackKey.setPressed(true); }
+        @Override void onDisable() { mc.options.attackKey.setPressed(false); }
+    }
+
+    static class AutoLog extends Module {
+        Setting hp = add(new Setting("HP", 6, 1, 20));
+        AutoLog() { super("AutoLog", Category.MISC); }
+        @Override void onTick() {
+            if (mc.player.getHealth() <= hp.f() && mc.getNetworkHandler() != null) {
+                enabled = false;
+                mc.getNetworkHandler().getConnection().disconnect(Text.literal("Oxion AutoLog: low HP"));
+            }
+        }
+    }
+
+    /** Turns every other module off at once. */
+    static class Panic extends Module {
+        Panic() { super("Panic", Category.MISC); }
+        @Override void onEnable() {
+            for (Module m : MODULES) if (m != this && m.enabled) { m.enabled = false; m.onDisable(); }
+            enabled = false;
+        }
+    }
 
     // ---------------- HUD ----------------
     static class HudElem {
