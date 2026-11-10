@@ -1507,4 +1507,4 @@ public class OxionClient implements ClientModInitializer {
         @Override public void removed() { saveConfig(); }
         @Override public boolean shouldPause() { return false; }
     }
-}
+                    }
