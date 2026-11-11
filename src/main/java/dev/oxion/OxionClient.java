@@ -1,4 +1,5 @@
 package dev.oxion;
+import net.minecraft.particle.ParticleTypes;
 
 import net.fabricmc.api.ClientModInitializer;
 import net.fabricmc.loader.api.FabricLoader;
