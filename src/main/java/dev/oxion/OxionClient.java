@@ -176,7 +176,7 @@ public class OxionClient implements ClientModInitializer {
         ClientLifecycleEvents.CLIENT_STOPPING.register(c -> saveConfig());
 
         HudRenderCallback.EVENT.register((ctx, tick) -> {
-            if (mc.player == null || mc.options.hudHidden || mc.options.debugEnabled) return;
+            if (mc.player == null || mc.options.hudHidden) return;
             if (find("HUD") instanceof HUD h && h.enabled) renderHud(ctx, h);
             int sw = ctx.getScaledWindowWidth(), sh = ctx.getScaledWindowHeight();
             for (Module m : MODULES) if (m.enabled) m.onHud(ctx, sw, sh);
@@ -740,7 +740,7 @@ public class OxionClient implements ClientModInitializer {
         Setting speed = add(new Setting("Speed", 1.2, 0.5, 3.0));
         ElytraFly() { super("ElytraFly", Category.MOVEMENT); }
         @Override void onTick() {
-            if (!mc.player.isFallFlying()) return;
+            if (!mc.player.isGliding()) return;
             if (mc.options.forwardKey.isPressed()) mc.player.setVelocity(mc.player.getRotationVector().multiply(speed.d()));
             else if (mc.options.sneakKey.isPressed()) mc.player.setVelocity(Vec3d.ZERO);
         }
