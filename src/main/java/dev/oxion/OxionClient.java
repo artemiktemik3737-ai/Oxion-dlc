@@ -8,6 +8,9 @@ import net.fabricmc.fabric.api.client.keybinding.v1.KeyBindingHelper;
 import net.fabricmc.fabric.api.client.rendering.v1.HudRenderCallback;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderContext;
 import net.fabricmc.fabric.api.client.rendering.v1.WorldRenderEvents;
+import net.minecraft.block.Block;
+import net.minecraft.block.Blocks;
+import net.minecraft.world.Heightmap;
 import net.minecraft.client.MinecraftClient;
 import net.minecraft.client.gui.DrawContext;
 import net.minecraft.client.gui.screen.Screen;
@@ -64,13 +67,19 @@ public class OxionClient implements ClientModInitializer {
 
     // ---------------- Settings ----------------
     public static class Setting {
-        final String name; double value; final double min, max; final boolean bool;
+        final String name; double value; final double min, max; final boolean bool; final String[] opts;
         Setting(String name, double value, double min, double max) {
-            this.name = name; this.value = value; this.min = min; this.max = max; this.bool = false;
+            this.name = name; this.value = value; this.min = min; this.max = max; this.bool = false; this.opts = null;
         }
         Setting(String name, boolean on) {
-            this.name = name; this.value = on ? 1 : 0; this.min = 0; this.max = 1; this.bool = true;
+            this.name = name; this.value = on ? 1 : 0; this.min = 0; this.max = 1; this.bool = true; this.opts = null;
         }
+        Setting(String name, int idx, String... opts) {
+            this.name = name; this.value = idx; this.min = 0; this.max = opts.length - 1; this.bool = false; this.opts = opts;
+        }
+        boolean isOpt() { return opts != null; }
+        String optName() { return opts[(int) Math.max(0, Math.min(opts.length - 1, Math.round(value)))]; }
+        void cycle() { value = (((int) Math.round(value)) + 1) % opts.length; }
         double d() { return value; }
         float f() { return (float) value; }
         boolean on() { return value > 0.5; }
@@ -99,6 +108,10 @@ public class OxionClient implements ClientModInitializer {
         MODULES.add(new ESP());
         MODULES.add(new BoxESP());
         MODULES.add(new Tracers());
+        MODULES.add(new BlockESP());
+        MODULES.add(new Rain());
+        MODULES.add(new Snow());
+        MODULES.add(new WetGround());
         MODULES.add(new Theme());
         MODULES.add(new HUD());
         MODULES.add(new AutoTotem());
@@ -211,6 +224,18 @@ public class OxionClient implements ClientModInitializer {
         return new float[]{yaw, MathHelper.clamp(pitch, -90f, 90f)};
     }
 
+    static float[] rotsToPoint(Vec3d p) {
+        Vec3d d = p.subtract(mc.player.getEyePos());
+        float yaw = (float) (Math.toDegrees(Math.atan2(d.z, d.x)) - 90f);
+        float pitch = (float) -Math.toDegrees(Math.atan2(d.y, Math.sqrt(d.x * d.x + d.z * d.z)));
+        return new float[]{yaw, MathHelper.clamp(pitch, -90f, 90f)};
+    }
+
+    static boolean holdingWeapon() {
+        ItemStack st = mc.player.getMainHandStack();
+        return st.isIn(ItemTags.SWORDS) || st.isIn(ItemTags.AXES);
+    }
+
     static float yawDelta(Entity e) { return MathHelper.wrapDegrees(rotsTo(e)[0] - mc.player.getYaw()); }
 
     static void attack(Entity e) {
@@ -245,14 +270,40 @@ public class OxionClient implements ClientModInitializer {
 
     // ---------------- Combat ----------------
     static class TriggerBot extends Module {
-        Setting cd = add(new Setting("Cooldown", 0.92, 0.5, 1.0));
+        Setting mode = add(new Setting("Mode", 0, "Legit", "Normal", "Rage"));
+        Setting cd = add(new Setting("Cooldown", 0.95, 0.5, 1.0));
+        Setting delay = add(new Setting("Delay", 2, 0, 10));
+        Setting range = add(new Setting("Range", 3.0, 2, 6));
         Setting pl = add(new Setting("Players", true)), mb = add(new Setting("Mobs", true));
+        Setting weapon = add(new Setting("OnlyWeapon", false));
+        Setting crits = add(new Setting("OnlyCrits", false));
+        Setting aim = add(new Setting("RageAutoAim", true));
+        int wait;
         TriggerBot() { super("TriggerBot", Category.COMBAT); }
         @Override void onTick() {
             if (mc.currentScreen != null) return;
-            HitResult hr = mc.crosshairTarget;
-            if (hr instanceof EntityHitResult ehr && validTarget(ehr.getEntity(), pl.on(), mb.on())
-                    && mc.player.getAttackCooldownProgress(0.5f) >= cd.f()) attack(ehr.getEntity());
+            int m = (int) Math.round(mode.d());
+            if (weapon.on() && !holdingWeapon()) return;
+            if (crits.on() && (mc.player.isOnGround() || mc.player.fallDistance <= 0f)) return;
+            double r = m == 0 ? Math.min(range.d(), 3.0) : range.d();
+            Entity target = null;
+            if (m == 2 && aim.on()) {
+                LivingEntity t = nearest(r, 360f, pl.on(), mb.on());
+                if (t != null && mc.player.canSee(t)) {
+                    float[] rot = rotsTo(t);
+                    mc.player.setYaw(rot[0]);
+                    mc.player.setPitch(rot[1]);
+                    target = t;
+                }
+            } else if (mc.crosshairTarget instanceof EntityHitResult ehr && validTarget(ehr.getEntity(), pl.on(), mb.on())
+                    && mc.player.distanceTo(ehr.getEntity()) <= r) {
+                target = ehr.getEntity();
+            }
+            if (target == null) { wait = 0; return; }
+            if (mc.player.getAttackCooldownProgress(0.5f) < cd.f()) return;
+            if (wait < (int) delay.d()) { wait++; return; }
+            wait = 0;
+            attack(target);
         }
     }
 
@@ -260,16 +311,30 @@ public class OxionClient implements ClientModInitializer {
         Setting range = add(new Setting("Range", 4.2, 1, 6));
         Setting speed = add(new Setting("Speed", 0.25, 0.05, 1));
         Setting fov = add(new Setting("FOV", 90, 10, 360));
-        Setting pl = add(new Setting("Players", true)), mb = add(new Setting("Mobs", true));
+        Setting part = add(new Setting("Target", 0, "Head", "Chest", "Legs"));
+        Setting vertical = add(new Setting("Vertical", true));
+        Setting visible = add(new Setting("VisibleOnly", true));
+        Setting sticky = add(new Setting("Sticky", false));
         Setting needClick = add(new Setting("OnlyOnClick", true));
+        Setting weapon = add(new Setting("OnlyWeapon", false));
+        Setting pl = add(new Setting("Players", true)), mb = add(new Setting("Mobs", true));
+        LivingEntity stuck;
         AimAssist() { super("AimAssist", Category.COMBAT); }
         @Override void onTick() {
             if (mc.currentScreen != null || (needClick.on() && !mc.options.attackKey.isPressed())) return;
-            LivingEntity t = nearest(range.d(), fov.f(), pl.on(), mb.on());
-            if (t == null) return;
-            float[] r = rotsTo(t);
-            mc.player.setYaw(mc.player.getYaw() + MathHelper.wrapDegrees(r[0] - mc.player.getYaw()) * speed.f());
-            mc.player.setPitch(MathHelper.clamp(mc.player.getPitch() + (r[1] - mc.player.getPitch()) * speed.f(), -90f, 90f));
+            if (weapon.on() && !holdingWeapon()) return;
+            LivingEntity t = null;
+            if (sticky.on() && stuck != null && stuck.isAlive() && mc.player.distanceTo(stuck) <= range.d()) t = stuck;
+            if (t == null) t = nearest(range.d(), fov.f(), pl.on(), mb.on());
+            if (t == null) { stuck = null; return; }
+            if (visible.on() && !mc.player.canSee(t)) return;
+            stuck = t;
+            double frac = switch ((int) Math.round(part.d())) { case 0 -> 0.92; case 1 -> 0.6; default -> 0.2; };
+            float[] r = rotsToPoint(new Vec3d(t.getX(), t.getBodyY(frac), t.getZ()));
+            float dy = MathHelper.wrapDegrees(r[0] - mc.player.getYaw()), dp = r[1] - mc.player.getPitch();
+            if (Math.abs(dy) < 1.0f && Math.abs(dp) < 1.0f) return;
+            mc.player.setYaw(mc.player.getYaw() + dy * speed.f());
+            if (vertical.on()) mc.player.setPitch(MathHelper.clamp(mc.player.getPitch() + dp * speed.f(), -90f, 90f));
         }
     }
 
@@ -423,6 +488,102 @@ public class OxionClient implements ClientModInitializer {
         BoxESP() { super("BoxESP", Category.RENDER); }
     }
 
+    static class BlockESP extends Module {
+        Setting radius = add(new Setting("Radius", 16, 6, 32));
+        Setting scanTicks = add(new Setting("ScanTicks", 20, 5, 60));
+        Setting diamond = add(new Setting("Diamond", true)), debris = add(new Setting("AncientDebris", true)),
+                gold = add(new Setting("Gold", true)), iron = add(new Setting("Iron", false)),
+                emerald = add(new Setting("Emerald", true)), chests = add(new Setting("Chests", true)),
+                spawners = add(new Setting("Spawners", true));
+        final List<BlockPos> found = new ArrayList<>();
+        final List<float[]> colors = new ArrayList<>();
+        int t;
+        BlockESP() { super("BlockESP", Category.RENDER); }
+        float[] colorFor(Block b) {
+            if (diamond.on() && (b == Blocks.DIAMOND_ORE || b == Blocks.DEEPSLATE_DIAMOND_ORE)) return new float[]{0.3f, 0.9f, 1f};
+            if (debris.on() && b == Blocks.ANCIENT_DEBRIS) return new float[]{0.6f, 0.3f, 0.2f};
+            if (gold.on() && (b == Blocks.GOLD_ORE || b == Blocks.DEEPSLATE_GOLD_ORE || b == Blocks.NETHER_GOLD_ORE)) return new float[]{1f, 0.85f, 0.2f};
+            if (iron.on() && (b == Blocks.IRON_ORE || b == Blocks.DEEPSLATE_IRON_ORE)) return new float[]{0.85f, 0.7f, 0.6f};
+            if (emerald.on() && (b == Blocks.EMERALD_ORE || b == Blocks.DEEPSLATE_EMERALD_ORE)) return new float[]{0.2f, 1f, 0.4f};
+            if (chests.on() && (b == Blocks.CHEST || b == Blocks.TRAPPED_CHEST || b == Blocks.ENDER_CHEST || b == Blocks.BARREL)) return new float[]{1f, 0.6f, 0.2f};
+            if (spawners.on() && b == Blocks.SPAWNER) return new float[]{0.9f, 0.2f, 0.9f};
+            return null;
+        }
+        @Override void onTick() {
+            if (++t < (int) scanTicks.d()) return;
+            t = 0;
+            found.clear();
+            colors.clear();
+            int r = (int) radius.d();
+            BlockPos c = mc.player.getBlockPos();
+            BlockPos.Mutable m = new BlockPos.Mutable();
+            for (int x = -r; x <= r; x++) for (int y = -r; y <= r; y++) for (int z = -r; z <= r; z++) {
+                m.set(c.getX() + x, c.getY() + y, c.getZ() + z);
+                float[] col = colorFor(mc.world.getBlockState(m).getBlock());
+                if (col != null) {
+                    found.add(m.toImmutable());
+                    colors.add(col);
+                    if (found.size() >= 400) return;
+                }
+            }
+        }
+        @Override void onDisable() { found.clear(); colors.clear(); }
+    }
+
+    /** Client-side rain made of particles. */
+    static class Rain extends Module {
+        Setting density = add(new Setting("Density", 20, 1, 80));
+        Setting radius = add(new Setting("Radius", 14, 6, 32));
+        Setting height = add(new Setting("Height", 8, 4, 16));
+        Setting splash = add(new Setting("GroundSplash", true));
+        Rain() { super("Rain", Category.RENDER); }
+        @Override void onTick() {
+            double r = radius.d();
+            for (int i = 0; i < (int) density.d(); i++) {
+                double x = mc.player.getX() + (Math.random() - 0.5) * 2 * r, z = mc.player.getZ() + (Math.random() - 0.5) * 2 * r;
+                int gy = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, (int) Math.floor(x), (int) Math.floor(z));
+                double y = Math.min(mc.player.getY() + height.d() + Math.random() * 3, gy + height.d() + Math.random() * 3);
+                mc.world.addParticle(ParticleTypes.FALLING_WATER, x, y, z, 0, -0.3, 0);
+                if (splash.on() && Math.random() < 0.5) mc.world.addParticle(ParticleTypes.RAIN, x, gy + 0.1, z, 0, 0, 0);
+            }
+        }
+    }
+
+    /** Client-side snowfall plus a sparkling snow layer on the ground (made of particles). */
+    static class Snow extends Module {
+        Setting density = add(new Setting("Density", 25, 1, 100));
+        Setting radius = add(new Setting("Radius", 14, 6, 32));
+        Setting height = add(new Setting("Height", 8, 4, 16));
+        Setting wind = add(new Setting("Wind", 0.02, 0, 0.12));
+        Setting ground = add(new Setting("GroundSnow", true));
+        Snow() { super("Snow", Category.RENDER); }
+        @Override void onTick() {
+            double r = radius.d();
+            for (int i = 0; i < (int) density.d(); i++) {
+                double x = mc.player.getX() + (Math.random() - 0.5) * 2 * r, z = mc.player.getZ() + (Math.random() - 0.5) * 2 * r;
+                int gy = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, (int) Math.floor(x), (int) Math.floor(z));
+                double y = Math.min(mc.player.getY() + height.d() + Math.random() * 4, gy + height.d() + Math.random() * 4);
+                mc.world.addParticle(ParticleTypes.SNOWFLAKE, x, y, z, (Math.random() - 0.3) * wind.d(), -0.06 - Math.random() * 0.04, (Math.random() - 0.5) * wind.d());
+                if (ground.on()) mc.world.addParticle(ParticleTypes.SNOWFLAKE, x, gy + 0.05, z, 0, 0, 0);
+            }
+        }
+    }
+
+    /** Wet-ground look: ripples and splashes on the ground around the player. */
+    static class WetGround extends Module {
+        Setting density = add(new Setting("Density", 14, 1, 60));
+        Setting radius = add(new Setting("Radius", 12, 4, 28));
+        WetGround() { super("WetGround", Category.RENDER); }
+        @Override void onTick() {
+            double r = radius.d();
+            for (int i = 0; i < (int) density.d(); i++) {
+                double x = mc.player.getX() + (Math.random() - 0.5) * 2 * r, z = mc.player.getZ() + (Math.random() - 0.5) * 2 * r;
+                int gy = mc.world.getTopY(Heightmap.Type.MOTION_BLOCKING, (int) Math.floor(x), (int) Math.floor(z));
+                mc.world.addParticle(ParticleTypes.RAIN, x, gy + 0.05, z, 0, 0, 0);
+            }
+        }
+    }
+
     static class Tracers extends Module {
         Setting pl = add(new Setting("Players", true)), mb = add(new Setting("Mobs", true));
         Setting range = add(new Setting("Range", 64, 8, 128));
@@ -433,7 +594,9 @@ public class OxionClient implements ClientModInitializer {
     static void renderWorld(WorldRenderContext ctx) {
         if (mc.player == null || mc.world == null) return;
         if (!(find("BoxESP") instanceof BoxESP box) || !(find("Tracers") instanceof Tracers tr)) return;
-        if (!box.enabled && !tr.enabled) return;
+        BlockESP be = find("BlockESP") instanceof BlockESP bb ? bb : null;
+        boolean blocks = be != null && be.enabled;
+        if (!box.enabled && !tr.enabled && !blocks) return;
         MatrixStack ms = ctx.matrixStack();
         if (ms == null || ctx.consumers() == null) return;
 
@@ -461,6 +624,12 @@ public class OxionClient implements ClientModInitializer {
                         .color(ri, gi, bi, 255).normal(en, (float) d.x, (float) d.y, (float) d.z);
                 vc.vertex(en, (float) end.x, (float) end.y, (float) end.z)
                         .color(ri, gi, bi, 255).normal(en, (float) d.x, (float) d.y, (float) d.z);
+            }
+        }
+        if (blocks) {
+            for (int k = 0; k < be.found.size(); k++) {
+                float[] c = be.colors.get(k);
+                VertexRendering.drawBox(ms, vc, new net.minecraft.util.math.Box(be.found.get(k)), c[0], c[1], c[2], 1.0f);
             }
         }
         ms.pop();
@@ -1321,29 +1490,48 @@ public class OxionClient implements ClientModInitializer {
         @Override public boolean shouldPause() { return false; }
     }
 
-    // ---------------- ClickGUI ----------------
+    // ---------------- ClickGUI (liquid glass, square) ----------------
     static class ClickGui extends Screen {
         static Category selCat = Category.COMBAT;
         static Module selMod;
-        static int scroll, setScroll;
-        static final int WW = 420, WH = 250, SIDE = 84, LISTW = 160, ROWH = 18, SPOFF = 256;
+        static boolean settingsOpen;
+        static float scrollY, setScrollY;
+        static final int PAD = 10, TABH = 18, CELLH = 34, GAP = 6;
         final long openT = System.currentTimeMillis();
         Setting dragSetting; int dragX, dragW;
         Module binding;
+        boolean pressing, scrolled;
+        double pressY; float pressScroll;
+        Runnable pending;
 
         ClickGui() { super(Text.literal("Oxion DLC")); }
 
-        float anim() {
-            float t = Math.min(1f, (System.currentTimeMillis() - openT) / 220f);
-            return 1 - (1 - t) * (1 - t);
-        }
-        int wx() { return (width - WW) / 2; }
-        int wy() { return (height - WH) / 2 + (int) ((1 - anim()) * 16); }
+        int S() { return Math.max(240, Math.min(320, Math.min(width, height) - 12)); }
+        float anim() { float t = Math.min(1f, (System.currentTimeMillis() - openT) / 240f); return 1 - (1 - t) * (1 - t); }
+        int x0() { return (width - S()) / 2; }
+        int y0() { return (height - S()) / 2 + (int) ((1 - anim()) * 18); }
+        int cx() { return x0() + PAD; }
+        int cy() { return y0() + 58; }
+        int cw() { return S() - 2 * PAD; }
+        int ch() { return S() - 58 - 22; }
+        int cellW() { return (cw() - GAP) / 2; }
+
         static int a(int c, float m) { int al = Math.max(4, (int) (((c >>> 24) & 0xFF) * m)); return (al << 24) | (c & 0xFFFFFF); }
         static boolean in(double mx, double my, int x, int y, int w, int h) { return mx >= x && mx < x + w && my >= y && my < y + h; }
         static void rrect(DrawContext ctx, int x, int y, int w, int h, int c) {
-            ctx.fill(x + 1, y, x + w - 1, y + h, c);
-            ctx.fill(x, y + 1, x + w, y + h - 1, c);
+            ctx.fill(x + 2, y, x + w - 2, y + h, c);
+            ctx.fill(x + 1, y + 1, x + w - 1, y + h - 1, c);
+            ctx.fill(x, y + 2, x + w, y + h - 2, c);
+        }
+        static void glass(DrawContext ctx, int x, int y, int w, int h, int tint, float an) {
+            rrect(ctx, x, y, w, h, a(0x22FFFFFF, an));
+            ctx.fillGradient(x + 2, y + 1, x + w - 2, y + h / 2, a(0x3DFFFFFF, an), a(0x00FFFFFF, an));
+            if ((tint >>> 24) != 0) rrect(ctx, x, y, w, h, a(tint, an));
+            int b = a(0x50FFFFFF, an);
+            ctx.fill(x + 2, y, x + w - 2, y + 1, b);
+            ctx.fill(x + 2, y + h - 1, x + w - 2, y + h, a(0x25FFFFFF, an));
+            ctx.fill(x, y + 2, x + 1, y + h - 2, a(0x30FFFFFF, an));
+            ctx.fill(x + w - 1, y + 2, x + w, y + h - 2, a(0x30FFFFFF, an));
         }
         static String pretty(Category c) { return c.name().charAt(0) + c.name().substring(1).toLowerCase(); }
         static List<Module> mods() {
@@ -1351,146 +1539,214 @@ public class OxionClient implements ClientModInitializer {
             for (Module m : MODULES) if (m.category == selCat) l.add(m);
             return l;
         }
-        static int visRows() { return (WH - 36) / ROWH; }
-        static int visSettings() { return (WH - 36 - 62) / 20; }
+
+        int gridMax(List<Module> L) {
+            int rows = (L.size() + 1) / 2;
+            return Math.max(0, rows * (CELLH + GAP) - GAP - ch());
+        }
+        int rowH(Setting st) { return st.isOpt() || st.bool ? 20 : 28; }
+        int setTotal(Module m) {
+            int t = 44;
+            for (Setting st : m.settings) t += rowH(st) + 4;
+            return t;
+        }
+        int setMax(Module m) { return Math.max(0, setTotal(m) - (ch() - 20)); }
 
         @Override public void render(DrawContext ctx, int mx, int my, float delta) {
-            float an = anim(); int x = wx(), y = wy();
-            ctx.fill(0, 0, width, height, a(0x99000000, an));
-            rrect(ctx, x - 1, y - 1, WW + 2, WH + 2, a((ACCENT & 0xFFFFFF) | 0x66000000, an));
-            rrect(ctx, x, y, WW, WH, a(0xF00D0D12, an));
-            rrect(ctx, x, y, WW, 22, a(0xFF15151C, an));
-            ctx.drawTextWithShadow(textRenderer, "Oxion", x + 8, y + 7, a(ACCENT, an));
-            ctx.drawTextWithShadow(textRenderer, "DLC", x + 8 + textRenderer.getWidth("Oxion "), y + 7, a(0xFFFFFFFF, an));
-            boolean hovE = in(mx, my, x + WW - 92, y + 3, 86, 16);
-            rrect(ctx, x + WW - 92, y + 3, 86, 16, a(hovE ? 0xFF2A2A36 : 0xFF1E1E28, an));
-            ctx.drawCenteredTextWithShadow(textRenderer, "HUD Editor", x + WW - 49, y + 7, a(0xFFFFFFFF, an));
+            float an = anim();
+            int S = S(), x = x0(), y = y0();
+            ctx.fillGradient(0, 0, width, height, a(0x88000000, an), a(0x55000000, an));
+            for (int i = 6; i >= 1; i--) rrect(ctx, x - i, y - i, S + 2 * i, S + 2 * i, a((ACCENT & 0xFFFFFF) | 0x0C000000, an));
+            rrect(ctx, x, y, S, S, a(0x6612121C, an));
+            ctx.fillGradient(x + 2, y + 1, x + S - 2, y + S / 3, a(0x30FFFFFF, an), a(0x00FFFFFF, an));
+            ctx.fillGradient(x + 2, y + S * 2 / 3, x + S - 2, y + S - 1, a(0x00000000, an), a((ACCENT & 0xFFFFFF) | 0x22000000, an));
+            ctx.fill(x + 2, y, x + S - 2, y + 1, a(0x70FFFFFF, an));
+            ctx.fill(x + 2, y + S - 1, x + S - 2, y + S, a(0x30FFFFFF, an));
+            ctx.fill(x, y + 2, x + 1, y + S - 2, a(0x45FFFFFF, an));
+            ctx.fill(x + S - 1, y + 2, x + S, y + S - 2, a(0x25FFFFFF, an));
+
+            // moving shine
             long now = System.currentTimeMillis();
-            for (int i = 0; i < WW; i += 2) {
-                int c = 0xFF000000 | MathHelper.hsvToRgb(((i / (float) WW) + (now % 4000) / 4000f) % 1f, 0.55f, 1f);
-                ctx.fill(x + i, y + 22, x + i + 2, y + 23, a(c, an));
+            int bx = x + (int) ((now / 18) % (S + 80)) - 40;
+            for (int k = -14; k <= 14; k++) {
+                int px = bx + k;
+                if (px <= x + 1 || px >= x + S - 1) continue;
+                ctx.fill(px, y + 2, px + 1, y + 30, a(((int) (0x26 * (1 - Math.abs(k) / 14f)) << 24) | 0xFFFFFF, an));
             }
 
-            ctx.fill(x, y + 23, x + SIDE, y + WH, a(0xFF101016, an));
+            // header
+            ctx.drawTextWithShadow(textRenderer, "OXION", x + PAD, y + 13, a(ACCENT, an));
+            ctx.drawTextWithShadow(textRenderer, "glass", x + PAD + textRenderer.getWidth("OXION "), y + 13, a(0xFFDDDDEE, an));
+            glass(ctx, x + S - PAD - 74, y + 8, 74, 18, 0, an);
+            ctx.drawCenteredTextWithShadow(textRenderer, "HUD Editor", x + S - PAD - 37, y + 13, a(0xFFFFFFFF, an));
+
+            // tabs
             Category[] cats = Category.values();
+            int tw = cw() / cats.length;
             for (int i = 0; i < cats.length; i++) {
-                int ry = y + 30 + i * 22;
-                boolean sel = cats[i] == selCat, hov = in(mx, my, x + 6, ry, SIDE - 12, 18);
-                if (sel) {
-                    rrect(ctx, x + 6, ry, SIDE - 12, 18, a((ACCENT & 0xFFFFFF) | 0x55000000, an));
-                    ctx.fill(x + 6, ry + 2, x + 8, ry + 16, a(ACCENT, an));
-                } else if (hov) rrect(ctx, x + 6, ry, SIDE - 12, 18, a(0x22FFFFFF, an));
-                ctx.drawTextWithShadow(textRenderer, pretty(cats[i]), x + 14, ry + 5, a(sel ? 0xFFFFFFFF : 0xFFAAAAB5, an));
+                int tx = cx() + i * tw;
+                boolean sel = cats[i] == selCat;
+                glass(ctx, tx + 1, y + 34, tw - 2, TABH, sel ? (ACCENT & 0xFFFFFF) | 0x66000000 : 0, an);
+                ctx.drawCenteredTextWithShadow(textRenderer, pretty(cats[i]), tx + tw / 2, y + 40, a(sel ? 0xFFFFFFFF : 0xFFB9B9C8, an));
             }
 
+            if (!settingsOpen || selMod == null) renderGrid(ctx, an, mx, my);
+            else renderSettings(ctx, an, mx, my);
+
+            ctx.drawCenteredTextWithShadow(textRenderer, "тап - вкл/выкл  |  > настройки  |  тяни - прокрутка", x + S / 2, y + S - 13, a(0xFF8A8AA0, an));
+        }
+
+        void renderGrid(DrawContext ctx, float an, int mx, int my) {
             List<Module> L = mods();
-            scroll = MathHelper.clamp(scroll, 0, Math.max(0, L.size() - visRows()));
-            int lx = x + SIDE + 6, ly = y + 30;
-            for (int i = 0; i < visRows(); i++) {
-                int idx = i + scroll;
-                if (idx >= L.size()) break;
-                Module m = L.get(idx);
-                int ry = ly + i * ROWH;
-                boolean hov = in(mx, my, lx, ry, LISTW, ROWH - 2);
-                int bg = m.enabled ? (ACCENT & 0xFFFFFF) | 0x77000000 : 0xFF17171E;
-                rrect(ctx, lx, ry, LISTW, ROWH - 2, a(bg, an));
-                if (hov) rrect(ctx, lx, ry, LISTW, ROWH - 2, a(0x18FFFFFF, an));
-                if (m == selMod) ctx.fill(lx, ry + 2, lx + 2, ry + ROWH - 4, a(ACCENT, an));
-                ctx.drawTextWithShadow(textRenderer, m.name, lx + 8, ry + 5, a(0xFFFFFFFF, an));
-                ctx.fill(lx + LISTW - 10, ry + 5, lx + LISTW - 4, ry + 11, a(m.enabled ? ACCENT : 0xFF33333B, an));
-            }
-            if (L.size() > visRows()) {
-                int total = L.size(), barH = (WH - 36) * visRows() / total;
-                int barY = ly + (WH - 36 - barH) * scroll / Math.max(1, total - visRows());
-                ctx.fill(lx + LISTW + 2, barY, lx + LISTW + 4, barY + barH, a(ACCENT, an));
-            }
-
-            int sx = x + SPOFF, sw = WW - SPOFF - 6, sy = y + 30;
-            rrect(ctx, sx, sy, sw, WH - 36, a(0xFF111117, an));
-            if (selMod == null) {
-                ctx.drawCenteredTextWithShadow(textRenderer, "Выбери модуль", sx + sw / 2, sy + 10, a(0xFF8888A0, an));
-            } else {
-                Module m = selMod;
-                ctx.drawTextWithShadow(textRenderer, m.name, sx + 6, sy + 6, a(ACCENT, an));
-                int by = sy + 20;
-                rrect(ctx, sx + 6, by, sw - 12, 16, a(m.enabled ? (ACCENT & 0xFFFFFF) | 0x88000000 : 0xFF1B1B22, an));
-                ctx.drawTextWithShadow(textRenderer, "Enabled: " + (m.enabled ? "ON" : "OFF"), sx + 12, by + 4, a(0xFFFFFFFF, an));
-                int by2 = sy + 40;
-                rrect(ctx, sx + 6, by2, sw - 12, 16, a(0xFF1B1B22, an));
-                String bk = binding == m ? "..." : (m.key.isUnbound() ? "NONE" : m.key.getBoundKeyLocalizedText().getString().toUpperCase());
-                ctx.drawTextWithShadow(textRenderer, "Bind: " + bk, sx + 12, by2 + 4, a(0xFFFFFFFF, an));
-                int py = sy + 62;
-                setScroll = MathHelper.clamp(setScroll, 0, Math.max(0, m.settings.size() - visSettings()));
-                for (int i = setScroll; i < m.settings.size() && i < setScroll + visSettings(); i++) {
-                    Setting st = m.settings.get(i);
-                    if (st.bool) {
-                        ctx.fill(sx + 8, py + 3, sx + 18, py + 13, a(st.on() ? ACCENT : 0xFF33333B, an));
-                        ctx.drawTextWithShadow(textRenderer, st.name, sx + 24, py + 4, a(0xFFDDDDDD, an));
-                    } else {
-                        rrect(ctx, sx + 6, py, sw - 12, 16, a(0xFF1B1B22, an));
-                        double r = (st.value - st.min) / (st.max - st.min);
-                        rrect(ctx, sx + 6, py, Math.max(2, (int) ((sw - 12) * r)), 16, a((ACCENT & 0xFFFFFF) | 0x88000000, an));
-                        ctx.drawTextWithShadow(textRenderer, st.name, sx + 10, py + 4, a(0xFFFFFFFF, an));
-                        String val = String.valueOf(st.value);
-                        ctx.drawTextWithShadow(textRenderer, val, sx + sw - 10 - textRenderer.getWidth(val), py + 4, a(0xFFFFFFFF, an));
-                    }
-                    py += 20;
+            scrollY = MathHelper.clamp(scrollY, 0, gridMax(L));
+            int cw = cellW();
+            ctx.enableScissor(cx(), cy(), cx() + cw(), cy() + ch());
+            for (int i = 0; i < L.size(); i++) {
+                Module m = L.get(i);
+                int tx = cx() + (i % 2) * (cw + GAP), ty = cy() + (i / 2) * (CELLH + GAP) - (int) scrollY;
+                if (ty + CELLH < cy() || ty > cy() + ch()) continue;
+                glass(ctx, tx, ty, cw, CELLH, m.enabled ? (ACCENT & 0xFFFFFF) | 0x66000000 : 0, an);
+                ctx.drawTextWithShadow(textRenderer, m.name, tx + 8, ty + 7, a(0xFFFFFFFF, an));
+                ctx.drawTextWithShadow(textRenderer, m.enabled ? "ON" : "OFF", tx + 8, ty + 20, a(m.enabled ? 0xFFFFFFFF : 0xFF8C8CA0, an));
+                if (!m.settings.isEmpty()) {
+                    ctx.fill(tx + cw - 22, ty + 6, tx + cw - 21, ty + CELLH - 6, a(0x33FFFFFF, an));
+                    ctx.drawTextWithShadow(textRenderer, ">", tx + cw - 13, ty + 13, a(0xFFDDDDEE, an));
                 }
             }
-            ctx.drawTextWithShadow(textRenderer, "ЛКМ - вкл/выкл, ПКМ - настройки, колесо - прокрутка", x + 8, y + WH - 11, a(0xFF77778A, an));
+            ctx.disableScissor();
+            int mxs = gridMax(L);
+            if (mxs > 0) {
+                int total = ch() + mxs, barH = Math.max(14, ch() * ch() / total);
+                int barY = cy() + (int) ((ch() - barH) * (scrollY / mxs));
+                ctx.fill(cx() + cw() + 1, barY, cx() + cw() + 3, barY + barH, a(ACCENT, an));
+            }
+        }
+
+        void renderSettings(DrawContext ctx, float an, int mx, int my) {
+            Module m = selMod;
+            setScrollY = MathHelper.clamp(setScrollY, 0, setMax(m));
+            int cw = cw();
+            glass(ctx, cx(), cy(), 56, 16, 0, an);
+            ctx.drawCenteredTextWithShadow(textRenderer, "< Back", cx() + 28, cy() + 4, a(0xFFFFFFFF, an));
+            ctx.drawTextWithShadow(textRenderer, m.name, cx() + 64, cy() + 4, a(ACCENT, an));
+
+            int top = cy() + 20;
+            ctx.enableScissor(cx(), top, cx() + cw, cy() + ch());
+            int py = top - (int) setScrollY;
+            glass(ctx, cx(), py, cw, 18, m.enabled ? (ACCENT & 0xFFFFFF) | 0x66000000 : 0, an);
+            ctx.drawTextWithShadow(textRenderer, "Enabled: " + (m.enabled ? "ON" : "OFF"), cx() + 8, py + 5, a(0xFFFFFFFF, an));
+            py += 22;
+            glass(ctx, cx(), py, cw, 18, 0, an);
+            String bk = binding == m ? "..." : (m.key.isUnbound() ? "NONE" : m.key.getBoundKeyLocalizedText().getString().toUpperCase());
+            ctx.drawTextWithShadow(textRenderer, "Bind: " + bk, cx() + 8, py + 5, a(0xFFFFFFFF, an));
+            py += 22;
+            for (Setting st : m.settings) {
+                int h = rowH(st);
+                if (st.bool) {
+                    glass(ctx, cx(), py, cw, h, 0, an);
+                    rrect(ctx, cx() + cw - 30, py + 4, 22, 12, a(st.on() ? (ACCENT & 0xFFFFFF) | 0xCC000000 : 0xFF2A2A36, an));
+                    ctx.fill(cx() + cw - (st.on() ? 18 : 28), py + 6, cx() + cw - (st.on() ? 10 : 20), py + 14, a(0xFFFFFFFF, an));
+                    ctx.drawTextWithShadow(textRenderer, st.name, cx() + 8, py + 6, a(0xFFE8E8F2, an));
+                } else if (st.isOpt()) {
+                    glass(ctx, cx(), py, cw, h, 0, an);
+                    ctx.drawTextWithShadow(textRenderer, st.name, cx() + 8, py + 6, a(0xFFE8E8F2, an));
+                    String v = "< " + st.optName() + " >";
+                    ctx.drawTextWithShadow(textRenderer, v, cx() + cw - 8 - textRenderer.getWidth(v), py + 6, a(ACCENT, an));
+                } else {
+                    ctx.drawTextWithShadow(textRenderer, st.name, cx() + 4, py, a(0xFFE8E8F2, an));
+                    String v = String.valueOf(st.value);
+                    ctx.drawTextWithShadow(textRenderer, v, cx() + cw - 4 - textRenderer.getWidth(v), py, a(0xFFFFFFFF, an));
+                    int by = py + 13;
+                    rrect(ctx, cx(), by, cw, 12, a(0x40FFFFFF, an));
+                    double r = (st.value - st.min) / (st.max - st.min);
+                    rrect(ctx, cx(), by, Math.max(4, (int) (cw * r)), 12, a((ACCENT & 0xFFFFFF) | 0xAA000000, an));
+                    ctx.fillGradient(cx() + 1, by + 1, cx() + Math.max(3, (int) (cw * r)) - 1, by + 6, a(0x40FFFFFF, an), a(0x00FFFFFF, an));
+                }
+                py += h + 4;
+            }
+            ctx.disableScissor();
         }
 
         @Override public boolean mouseClicked(double mx, double my, int button) {
-            int x = wx(), y = wy();
-            if (in(mx, my, x + WW - 92, y + 3, 86, 16)) { client.setScreen(new HudEditor()); return true; }
+            int x = x0(), y = y0(), S = S();
+            if (in(mx, my, x + S - PAD - 74, y + 8, 74, 18)) { client.setScreen(new HudEditor()); return true; }
             Category[] cats = Category.values();
+            int tw = cw() / cats.length;
             for (int i = 0; i < cats.length; i++) {
-                if (in(mx, my, x + 6, y + 30 + i * 22, SIDE - 12, 18)) { selCat = cats[i]; scroll = 0; selMod = null; return true; }
+                if (in(mx, my, cx() + i * tw + 1, y + 34, tw - 2, TABH)) { selCat = cats[i]; scrollY = 0; settingsOpen = false; return true; }
             }
-            List<Module> L = mods();
-            int lx = x + SIDE + 6, ly = y + 30;
-            for (int i = 0; i < visRows(); i++) {
-                int idx = i + scroll;
-                if (idx >= L.size()) break;
-                if (in(mx, my, lx, ly + i * ROWH, LISTW, ROWH - 2)) {
-                    Module m = L.get(idx);
-                    if (button == 0) m.toggle();
-                    if (selMod != m) setScroll = 0;
-                    selMod = m;
+            scrolled = false; pending = null; pressing = false;
+            if (!settingsOpen || selMod == null) {
+                if (!in(mx, my, cx(), cy(), cw(), ch())) return super.mouseClicked(mx, my, button);
+                pressing = true; pressY = my; pressScroll = scrollY;
+                List<Module> L = mods();
+                int cw = cellW();
+                for (int i = 0; i < L.size(); i++) {
+                    int tx = cx() + (i % 2) * (cw + GAP), ty = cy() + (i / 2) * (CELLH + GAP) - (int) scrollY;
+                    if (in(mx, my, tx, ty, cw, CELLH)) {
+                        Module m = L.get(i);
+                        boolean gear = mx >= tx + cw - 22 && !m.settings.isEmpty();
+                        final int btn = button;
+                        pending = () -> {
+                            if (btn == 1 || gear) { selMod = m; settingsOpen = true; setScrollY = 0; }
+                            else m.toggle();
+                        };
+                        break;
+                    }
+                }
+                return true;
+            }
+            Module m = selMod;
+            if (in(mx, my, cx(), cy(), 56, 16)) { settingsOpen = false; return true; }
+            int top = cy() + 20;
+            if (!in(mx, my, cx(), top, cw(), ch() - 20)) return super.mouseClicked(mx, my, button);
+            pressing = true; pressY = my; pressScroll = setScrollY;
+            int py = top - (int) setScrollY;
+            if (in(mx, my, cx(), py, cw(), 18)) { pending = m::toggle; return true; }
+            py += 22;
+            if (in(mx, my, cx(), py, cw(), 18)) { pending = () -> binding = m; return true; }
+            py += 22;
+            for (Setting st : m.settings) {
+                int h = rowH(st);
+                if (in(mx, my, cx(), py, cw(), h)) {
+                    if (st.bool) pending = () -> st.value = st.on() ? 0 : 1;
+                    else if (st.isOpt()) pending = st::cycle;
+                    else if (my >= py + 13) {
+                        dragSetting = st; dragX = cx(); dragW = cw();
+                        st.setFromRatio((mx - dragX) / dragW);
+                        pressing = false;
+                    }
                     return true;
                 }
+                py += h + 4;
             }
-            if (selMod != null) {
-                int sx = x + SPOFF, sw = WW - SPOFF - 6, sy = y + 30;
-                if (in(mx, my, sx + 6, sy + 20, sw - 12, 16)) { selMod.toggle(); return true; }
-                if (in(mx, my, sx + 6, sy + 40, sw - 12, 16)) { binding = selMod; return true; }
-                int py = sy + 62;
-                for (int i = setScroll; i < selMod.settings.size() && i < setScroll + visSettings(); i++) {
-                    Setting st = selMod.settings.get(i);
-                    if (in(mx, my, sx + 6, py, sw - 12, 16)) {
-                        if (st.bool) st.value = st.on() ? 0 : 1;
-                        else { dragSetting = st; dragX = sx + 6; dragW = sw - 12; st.setFromRatio((mx - dragX) / dragW); }
-                        return true;
-                    }
-                    py += 20;
-                }
-            }
-            return super.mouseClicked(mx, my, button);
+            return true;
         }
 
         @Override public boolean mouseDragged(double mx, double my, int button, double dx, double dy) {
             if (dragSetting != null) { dragSetting.setFromRatio((mx - dragX) / dragW); return true; }
+            if (pressing) {
+                double d = my - pressY;
+                if (Math.abs(d) > 4) scrolled = true;
+                if (scrolled) {
+                    if (settingsOpen && selMod != null) setScrollY = MathHelper.clamp((float) (pressScroll - d), 0, setMax(selMod));
+                    else scrollY = MathHelper.clamp((float) (pressScroll - d), 0, gridMax(mods()));
+                }
+                return true;
+            }
             return super.mouseDragged(mx, my, button, dx, dy);
         }
 
         @Override public boolean mouseReleased(double mx, double my, int button) {
-            dragSetting = null;
+            if (pressing && !scrolled && pending != null) pending.run();
+            pressing = false; scrolled = false; pending = null; dragSetting = null;
             return super.mouseReleased(mx, my, button);
         }
 
         @Override public boolean mouseScrolled(double mx, double my, double hAmount, double vAmount) {
-            int d = (int) -Math.signum(vAmount);
-            if (mx >= wx() + SPOFF) setScroll += d; else scroll += d;
+            float d = (float) -vAmount * 22f;
+            if (settingsOpen && selMod != null) setScrollY = MathHelper.clamp(setScrollY + d, 0, setMax(selMod));
+            else scrollY = MathHelper.clamp(scrollY + d, 0, gridMax(mods()));
             return true;
         }
 
@@ -1507,4 +1763,4 @@ public class OxionClient implements ClientModInitializer {
         @Override public void removed() { saveConfig(); }
         @Override public boolean shouldPause() { return false; }
     }
-}
+                    }
